@@ -1,4 +1,5 @@
 import os
+import ast
 import yaml
 from selenium import webdriver
 from selenium.webdriver.common.by import By
@@ -89,39 +90,43 @@ class OnePieceTcgScrapper:
                 soup = BeautifulSoup(page_content, 'html.parser')
                 card_details = soup.find('dl', id=id)
                 card_id = id
-                card_rarity = (card_details.find('div', class_='infoCol')).text.split('|')[1]
+                card_rarity = (card_details.find('div', class_='infoCol')).text.split('|')[1].replace('"', '').strip()
                 card_type = (card_details.find('div', class_='infoCol')).text.split('|')[2].replace('"', '').strip()
                 card_name = (card_details.find('div', class_='cardName')).text
-                card_cost_life = int(
-                    (card_details.find('div', class_='cost')).text.replace('Cost', '').replace('Life', '').replace('"',
-                                                                                                                   '').replace('-','0').strip())
+                card_cost_life = card_details.find('div', class_='cost').text
+                card_life = int(card_cost_life.replace('Life', '').replace('"','').strip()) if 'Life' in card_cost_life else None
+                card_cost = int(card_cost_life.replace('Cost', '').replace('"','').replace('-','0').strip()) if 'Cost' in card_cost_life else None
                 card_attribute = card_details.find('div', class_='attribute').text.replace('Attribute', '').strip()
+                card_attribute = [] if card_attribute == '-' else card_attribute.split('/')
                 card_power = card_details.find('div', class_='power').text.replace('Power', '').replace('"', '').strip()
-                card_counter = card_details.find('div', class_='counter').text.replace('Counter', '').replace('"',
-                                                                                                              '').strip()
-                card_color = card_details.find('div', class_='color').text.replace('Color', '').replace('"', '').strip()
-                card_factions = card_details.find('div', class_='feature').text.replace('Type', '').replace('"', '').split(
-                    '/')
+                card_power = None if card_power == '-' else card_power
+                card_counter = card_details.find('div', class_='counter').text.replace('Counter', '').replace('"','').strip()
+                card_counter = None if card_counter == '-' else card_counter
+                card_color = card_details.find('div', class_='color').text.replace('Color', '').replace('"', '').strip().split('/')
+                card_factions = card_details.find('div', class_='feature').text.replace('Type', '').replace('"', '').split('/')
                 card_text = card_details.find('div', class_='text').text.replace('Effect', '').replace('"', '')
-                card_keywords = re.findall(r'\[([^]]+)]', card_text)
-                card_edition = card_details.find('div', class_='getInfo').text.replace('Card Set(s)', '').replace('"',
-                                                                                                                  '').strip()
-                card_image = card_details.find('img')['src'].replace('..', 'https://en.onepiece-cardgame.com')
-                self.download_image(card_image, card_id)
+                card_text = '' if card_text == None or card_text == '-' else card_text
+                card_keywords = re.findall(r'\[([^]]+)]', card_text) if card_text else []
+                card_edition = card_details.find('div', class_='getInfo').text.replace('Card Set(s)', '').replace('"','').strip()
+                card_has_trigger = True if card_details.find('div', class_='trigger') != None or 'counter' in card_keywords else False
+                #card_image = card_details.find('img')['src'].replace('..', 'https://en.onepiece-cardgame.com')
+                #self.download_image(card_image, card_id)
                 card_data = {
                     'id': card_id,
                     'rarity': card_rarity,
                     'type': card_type,
                     'name': card_name,
                     'color': card_color,
-                    'cost_life': card_cost_life,
+                    'card_cost': card_cost,
+                    'card_life': card_life,
                     'attribute': card_attribute,
                     'power': card_power,
                     'counter': card_counter,
                     'factions': card_factions,
                     'text': card_text,
                     'keywords': card_keywords,
-                    'edition': card_edition
+                    'edition': card_edition,
+                    'has_trigger': card_has_trigger
                 }
                 self.data.append(card_data)
                 button = self.wait.until(
@@ -139,6 +144,14 @@ class OnePieceTcgScrapper:
         logging.info('CSV file for %s edition generated successfully', self.edition)
 
     def index_data_opensearch(self):
+        def convert_to_list(value):
+            if isinstance(value, str):
+                try:
+                    return ast.literal_eval(value)
+                except (ValueError, SyntaxError):
+                    logging.warning(f"Failed to convert value to list: {value}")
+                    return value
+            return value
         logging.info('Initializing data indexation to opendata...')
         index_name = 'cards'
         auth = (self.config['opensearch']['user'], self.config['opensearch']['pwd'])
@@ -154,6 +167,7 @@ class OnePieceTcgScrapper:
         logging.info('Current indexed items: % s', len(response['hits']['hits']))
         cards_id = [hit['_source']['id'] for hit in response['hits']['hits']]
         directory = '../Extracts/'
+        
         logging.info('Creating dataframe from csv exports')
         dataframes = []
         for filename in os.listdir(directory):
@@ -162,7 +176,15 @@ class OnePieceTcgScrapper:
                 df = pd.read_csv(file_path)
                 dataframes.append(df)
         combined_df = pd.concat(dataframes, ignore_index=True)
-
+        combined_df['factions'] = combined_df['factions'].apply(convert_to_list)
+        combined_df['keywords'] = combined_df['keywords'].apply(convert_to_list)
+        combined_df['color'] = combined_df['color'].apply(convert_to_list)
+        combined_df['card_cost'] = combined_df['card_cost'].fillna(0).astype(int)
+        combined_df['card_life'] = combined_df['card_life'].fillna(0).astype(int)
+        combined_df['power'] = combined_df['power'].fillna(0).astype(int)
+        combined_df['counter'] = combined_df['counter'].fillna(0).astype(int)
+        combined_df['text'] = combined_df['text'].fillna('')
+        combined_df['attribute'] = combined_df['attribute'].apply(convert_to_list)
         new_data = 0
         for i, row in combined_df.iterrows():
             if row['id'] in cards_id:
